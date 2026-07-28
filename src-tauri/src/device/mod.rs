@@ -1,15 +1,20 @@
+mod real;
+
+// Wildcard re-export (not a named list): `#[tauri::command]` also generates
+// hidden `__cmd__*` items alongside each function, and `tauri::generate_handler!`
+// needs those visible at the path it's given. A named `pub use real::{foo}`
+// only re-exports `foo` itself, not its hidden sibling, which breaks the
+// macro; `pub use real::*` brings both.
+pub use real::*;
+
 use serde::{Deserialize, Serialize};
 
-/// Information about a connected Apple device.
-///
-/// Populated today by `MockDeviceProvider` on the frontend. Once native USB
-/// detection lands (see project priority list, phase 6) it will be produced
-/// here in Rust by shelling out to `libimobiledevice` tooling (`idevice_id`,
-/// `ideviceinfo`) or an equivalent Rust binding, and exposed through a
-/// `list_devices` / `get_device_status` command.
+/// Information about a connected Apple device, as reported by the real
+/// (idevice-backed) device provider or persisted to the event log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
+    pub udid: String,
     pub name: String,
     pub model: String,
     pub os_version: String,
@@ -27,10 +32,11 @@ pub fn record_event(
     message: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO device_events (event, device_name, device_model, os_version, trusted, message)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO device_events (event, udid, device_name, device_model, os_version, trusted, message)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             event,
+            device.map(|d| d.udid.as_str()),
             device.map(|d| d.name.as_str()),
             device.map(|d| d.model.as_str()),
             device.map(|d| d.os_version.as_str()),

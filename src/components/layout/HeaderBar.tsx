@@ -42,8 +42,16 @@ export function HeaderBar() {
   }, [query]);
 
   const deviceLabel = status.device?.name ?? "No Device";
-  const deviceTone = status.state === "connected" ? "success" : status.state === "connecting" ? "warning" : status.state === "error" ? "danger" : "neutral";
-  const deviceMark = status.state === "connected" ? "✓" : status.state === "error" ? "✕" : "–";
+  const deviceTone =
+    status.state === "connected" || status.state === "ready"
+      ? "success"
+      : status.state === "connecting" || status.state === "pairing-required"
+        ? "warning"
+        : status.state === "error"
+          ? "danger"
+          : "neutral";
+  const deviceMark =
+    status.state === "connected" || status.state === "ready" ? "✓" : status.state === "error" ? "✕" : "–";
 
   return (
     <header className="header-bar">

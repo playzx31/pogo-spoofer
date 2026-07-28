@@ -3,10 +3,12 @@ import type { LocationStatus } from "./types";
 /**
  * Abstraction over "however the simulated location is currently being set".
  *
- * `MockLocationProvider` (pure in-memory, no device required) is the only
- * implementation today. See `docs/LOCATION_PROVIDERS.md` for research into
- * which Apple developer/testing interfaces could back a real provider, and
- * why none is wired up yet for unmodified App Store apps.
+ * Two implementations: `MockLocationProvider` (pure in-memory, no device
+ * required - used outside Tauri) and `TauriLocationProvider` (talks to a
+ * real USB-connected device via the Rust backend's `set_location`/
+ * `clear_location` commands). See `docs/LOCATION_PROVIDERS.md` for how the
+ * real one works and its real prerequisites (Developer Mode, Developer Disk
+ * Image).
  */
 export interface LocationProvider {
   readonly id: string;

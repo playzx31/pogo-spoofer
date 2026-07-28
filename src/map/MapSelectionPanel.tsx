@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { haversineDistanceKm, formatCoordinate, formatDistance } from "../lib/geo";
 import { useLocationStore } from "../state/locationStore";
 import { useSettingsStore } from "../state/settingsStore";
@@ -10,10 +12,25 @@ export function MapSelectionPanel() {
   const setDestination = useLocationStore((s) => s.setDestination);
   const setTestLocation = useLocationStore((s) => s.setTestLocation);
   const units = useSettingsStore((s) => s.units);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!selectedPoint) return null;
 
   const distanceKm = haversineDistanceKm(current, selectedPoint);
+
+  const handleSetTestLocation = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      await setTestLocation(selectedPoint, "map-click");
+      selectPoint(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(false);
+    }
+  };
 
   return (
     <div className="map-selection-panel panel">
@@ -38,6 +55,8 @@ export function MapSelectionPanel() {
         <span className="mono">{formatDistance(distanceKm, units)}</span>
       </div>
 
+      {error && <p className="map-selection-panel__error">{error}</p>}
+
       <div className="map-selection-panel__actions">
         <button
           className="btn"
@@ -45,17 +64,12 @@ export function MapSelectionPanel() {
             setDestination(selectedPoint);
             selectPoint(null);
           }}
+          disabled={pending}
         >
           Set Destination
         </button>
-        <button
-          className="btn btn-primary"
-          onClick={() => {
-            void setTestLocation(selectedPoint, "map-click");
-            selectPoint(null);
-          }}
-        >
-          Set Test Location
+        <button className="btn btn-primary" onClick={() => void handleSetTestLocation()} disabled={pending}>
+          {pending ? "Setting…" : "Set Test Location"}
         </button>
       </div>
     </div>

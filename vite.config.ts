@@ -8,6 +8,16 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // maplibre-gl ships its own web worker (maplibre-gl-worker.mjs) that Vite's
+  // esbuild dependency pre-bundling doesn't handle - pre-bundling it produces
+  // a broken/missing worker chunk ("does not exist in .vite/deps") that only
+  // shows up after the first cold start, and manually deleting node_modules/.vite
+  // is not a real fix. Excluding it from optimizeDeps makes Vite serve it
+  // as-is instead, which is the documented workaround for this class of issue.
+  optimizeDeps: {
+    exclude: ["maplibre-gl"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

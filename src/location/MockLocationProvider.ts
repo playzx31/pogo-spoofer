@@ -1,7 +1,5 @@
 import type { LocationProvider } from "./LocationProvider";
-import type { LocationStatus } from "./types";
-
-const DEFAULT_LOCATION = { latitude: 42.6073, longitude: -82.983 };
+import { DEFAULT_LOCATION, type LocationStatus } from "./types";
 
 /**
  * Fully in-memory location provider. Requires no device, no network, and no

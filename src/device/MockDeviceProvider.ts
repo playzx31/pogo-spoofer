@@ -7,6 +7,7 @@ const SCENARIOS: Record<MockScenario, () => DeviceStatus> = {
   "trusted-ipad": () => ({
     state: "connected",
     device: {
+      udid: "00008030-mock000000000001",
       name: "Kenneth's iPad",
       model: "iPad Pro (12.9-inch) (6th generation)",
       osVersion: "iPadOS 18.1",
@@ -18,6 +19,7 @@ const SCENARIOS: Record<MockScenario, () => DeviceStatus> = {
   "untrusted-ipad": () => ({
     state: "error",
     device: {
+      udid: "00008030-mock000000000002",
       name: "iPad",
       model: "iPad Pro (12.9-inch) (6th generation)",
       osVersion: "iPadOS 18.1",

@@ -46,7 +46,9 @@ export function destinationPoint(start: Coordinates, bearingDeg: number, distanc
   const sinPhi2 =
     Math.sin(phi1) * Math.cos(angularDistance) +
     Math.cos(phi1) * Math.sin(angularDistance) * Math.cos(bearing);
-  const phi2 = Math.asin(sinPhi2);
+  // Floating-point rounding can push this a hair past +/-1 right at the
+  // poles, which would make asin() return NaN - clamp to the valid domain.
+  const phi2 = Math.asin(Math.min(1, Math.max(-1, sinPhi2)));
 
   const y = Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(phi1);
   const x = Math.cos(angularDistance) - Math.sin(phi1) * sinPhi2;
@@ -54,8 +56,18 @@ export function destinationPoint(start: Coordinates, bearingDeg: number, distanc
 
   return {
     latitude: toDeg(phi2),
-    longitude: ((toDeg(lambda2) + 540) % 360) - 180, // normalize to [-180, 180]
+    longitude: normalizeLongitude(toDeg(lambda2)),
   };
+}
+
+/** Wraps any finite longitude into [-180, 180), so crossing the antimeridian during movement stays a valid coordinate. */
+export function normalizeLongitude(longitude: number): number {
+  return ((longitude + 540) % 360) - 180;
+}
+
+/** `-90 <= latitude <= 90`; used to validate manual coordinate entry before it ever reaches a LocationProvider. */
+export function isValidLatitude(latitude: number): boolean {
+  return Number.isFinite(latitude) && latitude >= -90 && latitude <= 90;
 }
 
 export function kmToMiles(km: number): number {

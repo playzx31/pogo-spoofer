@@ -1,10 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { useSettingsStore } from "../state/settingsStore";
+import { useDeviceStore } from "../state/deviceStore";
+import { useLocationStore } from "../state/locationStore";
 import { safeInvoke, isTauri } from "../lib/tauri";
 import "./SettingsPage.css";
 
 export function SettingsPage() {
+  const deviceProviderId = useDeviceStore((s) => s.provider.id);
+  const locationProviderId = useLocationStore((s) => s.provider.id);
   const units = useSettingsStore((s) => s.units);
   const setUnits = useSettingsStore((s) => s.setUnits);
   const speeds = useSettingsStore((s) => s.speeds);
@@ -98,15 +102,16 @@ export function SettingsPage() {
       <Section title="Providers">
         <div className="settings-page__row">
           <label>Device provider</label>
-          <span className="mono">Mock Device Provider</span>
+          <span className="mono">{deviceProviderId}</span>
         </div>
         <div className="settings-page__row">
           <label>Location provider</label>
-          <span className="mono">Mock Location Provider</span>
+          <span className="mono">{locationProviderId}</span>
         </div>
         <p className="settings-page__hint">
-          Real USB device detection and any supported device-testing location interface will appear here once implemented, without
-          changing anything else in the app.
+          {isTauri()
+            ? "Real USB device detection and location simulation via usbmuxd/lockdown (see the README's \"Developer Disk Image\" section for prerequisites)."
+            : "Running outside the Tauri app (e.g. `pnpm dev` in a browser), so the mock providers are active - the built app always uses the real ones above."}
         </p>
       </Section>
 

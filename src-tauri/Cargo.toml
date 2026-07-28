@@ -25,4 +25,24 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 log = "0.4"
 tauri-plugin-log = "2"
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Pure-Rust reimplementation of libimobiledevice's protocols (usbmuxd,
+# lockdown, pairing, DVT location simulation, mobile image mounter). Chosen
+# over rusty_libimobiledevice (FFI bindings to the C library) because it has
+# no native C library to install/link on Windows - everything it needs is a
+# normal Cargo dependency, which matters for producing a distributable .exe.
+# It is explicitly a pre-1.0 "research stage" project (used in production by
+# StikDebug/CrossCode) with breaking changes between point releases, so the
+# version below is pinned deliberately - bump it consciously, not via a
+# routine `cargo update`.
+idevice = { version = "=0.1.65", default-features = false, features = [
+    "aws-lc",
+    "usbmuxd",
+    "pair",
+    "location_simulation",
+    "mobile_image_mounter",
+] }
+plist = "1.8"
 

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { createDeviceProvider } from "../device/createDeviceProvider";
 import { MockDeviceProvider, type MockScenario } from "../device/MockDeviceProvider";
 import type { DeviceProvider } from "../device/DeviceProvider";
 import { DISCONNECTED_STATUS, type DeviceStatus } from "../device/types";
@@ -8,6 +9,8 @@ import { useLogStore } from "./logStore";
 
 interface DeviceState {
   provider: DeviceProvider;
+  /** True only when `provider` is the simulated dev-mode provider (no real hardware). */
+  isMockProvider: boolean;
   status: DeviceStatus;
   busy: boolean;
 
@@ -17,7 +20,7 @@ interface DeviceState {
   setMockScenario: (scenario: MockScenario) => void;
 }
 
-const provider = new MockDeviceProvider();
+const provider = createDeviceProvider();
 
 async function persistEvent(event: string, status: DeviceStatus) {
   await safeInvoke("record_device_event", {
@@ -27,6 +30,20 @@ async function persistEvent(event: string, status: DeviceStatus) {
   });
 }
 
+function describeEventKind(status: DeviceStatus): string {
+  switch (status.state) {
+    case "connected":
+    case "ready":
+      return "connected";
+    case "pairing-required":
+      return "pairing-required";
+    case "disconnected":
+      return "disconnected";
+    default:
+      return "error";
+  }
+}
+
 export const useDeviceStore = create<DeviceState>((set, get) => {
   provider.onStatusChange((status) => {
     set({ status, busy: status.state === "connecting" });
@@ -34,6 +51,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => {
 
   return {
     provider,
+    isMockProvider: provider instanceof MockDeviceProvider,
     status: DISCONNECTED_STATUS,
     busy: false,
 
@@ -41,12 +59,14 @@ export const useDeviceStore = create<DeviceState>((set, get) => {
       set({ busy: true });
       await provider.connect();
       const status = get().status;
-      if (status.state === "connected") {
+      if (status.state === "connected" || status.state === "ready") {
         useLogStore.getState().log("info", `Device connected: ${status.device?.name}`, status.device?.model);
+      } else if (status.state === "pairing-required") {
+        useLogStore.getState().log("info", "Waiting for device trust", status.error?.message);
       } else if (status.error) {
         useLogStore.getState().log("error", "Device connection failed", status.error.message);
       }
-      await persistEvent(status.state === "connected" ? "connected" : "error", status);
+      await persistEvent(describeEventKind(status), status);
     },
 
     disconnect: async () => {
@@ -61,9 +81,11 @@ export const useDeviceStore = create<DeviceState>((set, get) => {
       await provider.reconnect();
       const status = get().status;
       useLogStore.getState().log("info", "Device reconnect attempted", status.state);
-      await persistEvent("reconnect", status);
+      await persistEvent(describeEventKind(status), status);
     },
 
-    setMockScenario: (scenario) => provider.setScenario(scenario),
+    setMockScenario: (scenario) => {
+      if (provider instanceof MockDeviceProvider) provider.setScenario(scenario);
+    },
   };
 });

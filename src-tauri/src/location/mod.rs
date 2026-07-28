@@ -1,10 +1,13 @@
+mod real;
+mod validate;
+
+pub use real::*;
+
 /// Shared location-event persistence.
 ///
-/// The actual `LocationProvider` implementations (mock + any future
-/// supported device-testing provider) live on the frontend today, per
-/// `src/location/LocationProvider.ts`. This module just records the events
-/// they produce so History/Logs have real data to show, and haversine
-/// distance is computed identically to the frontend copy for storage.
+/// `haversine_km`/`record_event` back the History/Logs pages regardless of
+/// which `LocationProvider` produced the change (mock or the real
+/// `set_location` command below).
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const EARTH_RADIUS_KM: f64 = 6371.0088;
     let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
@@ -38,4 +41,29 @@ pub fn record_event(
     )?;
 
     Ok(distance_km.unwrap_or(0.0))
+}
+
+#[cfg(test)]
+mod haversine_tests {
+    use super::haversine_km;
+
+    #[test]
+    fn zero_distance_for_identical_points() {
+        assert!(haversine_km(42.0, -83.0, 42.0, -83.0) < 1e-9);
+    }
+
+    #[test]
+    fn known_distance_windsor_to_nyc_is_roughly_774km() {
+        // Matches the distance surfaced in the travel-timer UI for this pair
+        // (42.6073, -82.983) -> (40.758, -73.9855), verified end-to-end
+        // against the frontend's identical haversine implementation.
+        let km = haversine_km(42.6073, -82.983, 40.758, -73.9855);
+        assert!((km - 774.5).abs() < 2.0, "expected ~774.5 km, got {km}");
+    }
+
+    #[test]
+    fn antipodal_points_are_roughly_half_earth_circumference() {
+        let km = haversine_km(0.0, 0.0, 0.0, 180.0);
+        assert!((km - 20015.0).abs() < 5.0, "expected ~20015 km, got {km}");
+    }
 }

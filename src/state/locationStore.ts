@@ -1,9 +1,11 @@
 import { create } from "zustand";
 
 import { haversineDistanceKm, type Coordinates } from "../lib/geo";
-import { MockLocationProvider } from "../location/MockLocationProvider";
+import { createLocationProvider } from "../location/createLocationProvider";
 import type { LocationProvider } from "../location/LocationProvider";
+import { DEFAULT_LOCATION } from "../location/types";
 import { safeInvoke } from "../lib/tauri";
+import { toFriendlyError, type FriendlyError } from "../lib/errors";
 import { useLogStore } from "./logStore";
 
 export type LocationSource = "map-click" | "manual-entry" | "movement" | "system";
@@ -25,6 +27,8 @@ interface LocationState {
   /** A point the user just clicked/searched, pending confirmation as a destination or test location. */
   selectedPoint: Coordinates | null;
   lastChange: LocationChangeRecord | null;
+  /** The most recent real failure from the active LocationProvider, if any - cleared on the next successful call. */
+  lastError: FriendlyError | null;
 
   // Live movement telemetry, updated by the MovementEngine while a
   // direction is held.
@@ -37,20 +41,22 @@ interface LocationState {
   setTestLocation: (coords: Coordinates, source: LocationSource) => Promise<void>;
   setDestination: (coords: Coordinates | null) => void;
   selectPoint: (coords: Coordinates | null) => void;
-  applyMovementTick: (coords: Coordinates, heading: number, speedKmh: number, deltaKm: number) => void;
+  applyMovementTick: (coords: Coordinates, heading: number, speedKmh: number, deltaKm: number) => Promise<void>;
   setMovementActive: (active: boolean) => void;
   resetSessionDistance: () => void;
+  clearLastError: () => void;
 }
 
 let nextRecordId = 1;
 
 export const useLocationStore = create<LocationState>((set, get) => ({
-  provider: new MockLocationProvider(),
+  provider: createLocationProvider(),
   connected: false,
-  current: { latitude: 42.6073, longitude: -82.983 },
+  current: { ...DEFAULT_LOCATION },
   destination: null,
   selectedPoint: null,
   lastChange: null,
+  lastError: null,
 
   movementActive: false,
   heading: null,
@@ -68,9 +74,17 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   setTestLocation: async (coords, source) => {
     const { provider, current } = get();
     const old = current;
-    await provider.setLocation(coords.latitude, coords.longitude);
-    const distanceKm = haversineDistanceKm(old, coords);
 
+    try {
+      await provider.setLocation(coords.latitude, coords.longitude);
+    } catch (error) {
+      const friendly = toFriendlyError(error);
+      set({ lastError: friendly });
+      useLogStore.getState().log("error", "Set Test Location failed", friendly.message);
+      throw error;
+    }
+
+    const distanceKm = haversineDistanceKm(old, coords);
     const record: LocationChangeRecord = {
       id: nextRecordId++,
       old,
@@ -80,7 +94,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       timestamp: new Date().toISOString(),
     };
 
-    set({ current: coords, lastChange: record, connected: true });
+    set({ current: coords, lastChange: record, connected: true, lastError: null });
 
     useLogStore
       .getState()
@@ -102,19 +116,24 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   setDestination: (coords) => set({ destination: coords }),
   selectPoint: (coords) => set({ selectedPoint: coords }),
 
-  applyMovementTick: (coords, heading, speedKmh, deltaKm) => {
+  applyMovementTick: async (coords, heading, speedKmh, deltaKm) => {
+    // Awaited (not fire-and-forget): the real provider does a USB round
+    // trip per call, and the map/store must only reflect a position the
+    // device actually confirmed - never one that merely looks correct
+    // locally while the device rejected it.
+    await get().provider.setLocation(coords.latitude, coords.longitude);
     set((state) => ({
       current: coords,
       heading,
       speedKmh,
       sessionDistanceKm: state.sessionDistanceKm + deltaKm,
+      lastError: null,
     }));
-    // Fire-and-forget: keep the provider's internal status in sync without
-    // awaiting on every animation tick.
-    void get().provider.setLocation(coords.latitude, coords.longitude);
   },
 
   setMovementActive: (active) => set({ movementActive: active, ...(active ? {} : { heading: null, speedKmh: 0 }) }),
 
   resetSessionDistance: () => set({ sessionDistanceKm: 0 }),
+
+  clearLastError: () => set({ lastError: null }),
 }));

@@ -22,6 +22,16 @@ export const HEADING_ARROWS: Record<CompassDirection, string> = {
   NW: "↖",
 };
 
+const DEGREES_TO_DIRECTION = new Map<number, CompassDirection>(
+  (Object.entries(HEADING_DEGREES) as [CompassDirection, number][]).map(([dir, deg]) => [deg, dir]),
+);
+
+/** Reverse lookup of `HEADING_DEGREES`, used to derive which joystick arrow to highlight from a live heading. */
+export function directionFromHeading(headingDeg: number | null): CompassDirection | null {
+  if (headingDeg === null) return null;
+  return DEGREES_TO_DIRECTION.get(headingDeg) ?? null;
+}
+
 /** Combine independent N/S and E/W key states into one of the 8 directions, or null if idle. */
 export function directionFromKeys(north: boolean, south: boolean, east: boolean, west: boolean): CompassDirection | null {
   const vertical = north && !south ? "N" : south && !north ? "S" : null;

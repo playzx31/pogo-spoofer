@@ -6,6 +6,8 @@ mod location;
 use std::sync::Mutex;
 
 use database::AppState;
+use device::DeviceManager;
+use location::LocationManager;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +22,10 @@ pub fn run() {
         .setup(|app| {
             let conn = database::init(app.handle())?;
             app.manage(AppState { db: Mutex::new(conn) });
+            app.manage(DeviceManager::default());
+            app.manage(LocationManager::default());
+
+            device::spawn_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -29,6 +35,13 @@ pub fn run() {
             commands::list_device_events,
             commands::record_location_event,
             commands::list_location_events,
+            device::list_devices,
+            device::refresh_devices,
+            device::get_device_info,
+            device::pair_device,
+            location::set_location,
+            location::clear_location,
+            location::get_location_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

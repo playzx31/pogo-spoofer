@@ -1,72 +1,99 @@
-# Location providers: what's implemented, and what supported interfaces exist
+# Location providers: what's implemented, and why it needs what it needs
 
 This app talks to "the current simulated location" through the `LocationProvider`
-interface (`src/location/LocationProvider.ts`), never directly. That's what lets us
-ship a fully working app today on `MockLocationProvider`, and swap in a real
-device-testing provider later without touching the UI, map, or movement engine.
+interface (`src/location/LocationProvider.ts`), never directly. That's what let the
+whole map/joystick/travel-timer UI get built and tested against a mock before any
+real device code existed, and lets the real provider slot in later without
+touching the UI.
 
-## Implemented today
+## Implemented
 
-**`MockLocationProvider`** - entirely in-memory, no device or network required.
-This is what every other feature (map, joystick, travel timer, history logging) is
-built and tested against.
+**`MockLocationProvider`** - entirely in-memory, no device required. Used
+automatically outside the Tauri app (`pnpm dev` in a browser tab) for UI work.
 
-## Researched: supported Apple developer/testing location interfaces
+**`TauriLocationProvider`** (frontend) + `set_location`/`clear_location` (Rust,
+`src-tauri/src/location/real.rs`) - the real one. It uses the
+[`idevice`](https://github.com/jkcoxson/idevice) crate, a pure-Rust
+reimplementation of libimobiledevice's protocols, to talk to the
+`com.apple.dt.simulatelocation` service over USB - the same lockdown service
+Xcode's own "Simulate Location" feature uses. Concretely:
 
-The goal was to find a way to set a real iPad/iPhone's reported location that is
-(a) Apple-sanctioned or at least built on public, documented APIs, (b) not a
-jailbreak or private-API hook, and (c) doesn't require reverse-engineering or
-touching Pokémon GO itself. Three options exist, and none of them is a drop-in
-"control any installed app's GPS from a Windows app over USB" button:
+- `usbmuxd` (`idevice::usbmuxd`) finds the device over USB and gets a pairing
+  record.
+- `lockdown` (`idevice::lockdown`) opens an authenticated session and asks the
+  device to start the `com.apple.dt.simulatelocation` service on a port.
+- `simulate_location` (`idevice::simulate_location::LocationSimulationService`)
+  sends the actual `set(lat, lon)` / `clear()` request on that port.
 
-1. **Xcode's built-in location simulation** (Debug ▸ Simulate Location, or a `.gpx`
-   route). This only affects an app that Xcode itself launched in a debug session
-   on a device Xcode is attached to. It cannot be pointed at an already-installed
-   App Store app like Pokémon GO, and it requires a Mac running Xcode - not
-   applicable to a Windows-hosted controller at all.
+This is a supported *developer/testing* interface, not a private
+reverse-engineered game protocol: it's Apple's own on-device service for
+simulating GPS location during development, and it changes only what
+CoreLocation reports system-wide - it doesn't touch Pokémon GO, read its
+memory, or intercept its network traffic.
 
-2. **Jailbreak location-spoofing tweaks** (e.g. the classic "LocationFaker"-style
-   tools). Explicitly out of scope: this project must not bypass device integrity
-   or jailbreak-detection systems, per the project constraints.
+### Real prerequisites (this is not automatic)
 
-3. **WebDriverAgent / XCTest-based simulated location.** This is the one real
-   candidate. `WebDriverAgent` (the open-source project Appium's XCUITest driver
-   uses) is a normal, development-signed app you install on the device once via
-   Xcode. It exposes an HTTP API (the same one UI-testing tools use) that can set
-   a simulated GPS location for the whole device while a WDA test session is
-   running. Because it's plain HTTP, a Windows app can talk to it over USB by
-   forwarding WDA's port through `usbmuxd`/`iproxy` - no Mac needed at *runtime*,
-   only for the one-time WDA install/signing step.
+Two things must be true on the device before `set_location` will succeed, and
+the app cannot arrange either of them for you from Windows:
 
-   Important caveats that keep this out of "just works, ship it":
-   - It requires a one-time Mac + free Apple ID (for a 7-day dev signature) or a
-     paid Apple Developer account (for a 1-year signature) to build and install
-     WebDriverAgent on the target device. That's a real setup cost for the user,
-     not something this app can do for them from Windows.
-   - The simulated location it sets is **system-wide CoreLocation output** for as
-     long as the WDA session is active - it doesn't know or care which app reads
-     it. That means it would affect Pokémon GO the same way it affects any app,
-     which is exactly the capability this project is allowed to expose (a
-     supported, non-jailbreak GPS override) - but it does **not** do anything to
-     help evade Niantic's own client-side or server-side spoofing detection, and
-     this app will not add anything that tries to. That risk (and Pokémon GO's
-     Terms of Service) is on the user, same as it would be with any GPS-spoofing
-     method, and the UI must say so plainly if/when this provider ships.
+1. **Developer Mode enabled** (Settings → Privacy & Security → Developer Mode,
+   iOS 16+). Checked via `query_developer_mode_status` on
+   `com.apple.mobile.mobile_image_mounter` and surfaced as
+   `IdeviceError::DeveloperModeNotEnabled` if off.
+2. **A Developer Disk Image mounted.** `com.apple.dt.simulatelocation` (like
+   most `com.apple.dt.*` services) only becomes available once a Developer
+   Disk Image is mounted on the device. `ImageMounter::mount_developer` (Rust
+   side, `idevice::mobile_image_mounter`) can mount a classic (pre-iOS 17)
+   image if you supply `DeveloperDiskImage.dmg` + its `.signature` file - the
+   files Xcode itself uses, found under Xcode's
+   `Platforms/iPhoneOS.platform/DeviceSupport/<version>/` on a Mac, or from any
+   mirror of Apple's own images.
 
-**Conclusion:** a WDA-backed `LocationProvider` is technically buildable in a later
-phase (it's priority #7 on the project's own list, after USB device detection) and
-is the plan for "the legitimate supported device-testing provider" called for in
-the project brief. It is not implemented yet. Nothing in the app currently claims
-otherwise - the Device and Settings pages label the active provider as "Mock" and
-say so.
+   **iOS 17+ uses a "Personalized" Developer Disk Image instead** - a
+   cryptographically signed, per-device cryptex bundle that normally requires
+   Xcode talking to Apple's TSS signing servers to produce. `idevice` has the
+   low-level pieces for this (`mount_personalized`, `get_manifest_from_tss`),
+   but wiring up the full flow (nonce exchange, personalization manifest,
+   locating a valid image/trustcache/build-manifest triple for the device's
+   exact build) is **not implemented in this pass** - it needs either a Mac
+   with Xcode to do the one-time mount, or hardware to validate against, which
+   this sandbox has neither of. Shipping that flow half-verified would risk
+   exactly the "claims success it can't back up" failure mode this project is
+   explicit about avoiding. It's tracked as follow-up work.
 
-## What this means for the UI today
+### What this means day to day
 
-- `DeviceProvider` and `LocationProvider` are both plain interfaces with exactly
-  one implementation each (`MockDeviceProvider`, `MockLocationProvider`), wired up
-  behind a single factory point (`src/state/deviceStore.ts`,
-  `src/state/locationStore.ts`). Adding a `WebDriverAgentLocationProvider` later
-  means writing that one class and swapping the constructor call - no UI changes.
-- Every place a provider is named in the UI (header badge, Device page, Settings)
-  says "Mock" explicitly, so nothing implies a real device is being controlled
-  when it isn't.
+- On iOS 17+, until the personalized-DDI flow above is built, `set_location`
+  will most likely fail with "Developer Disk Image is not mounted" even with
+  Developer Mode on, unless the device has had a Developer Disk Image mounted
+  by some other means (e.g. it was connected to Xcode once).
+- On iOS 16 and earlier, mounting the classic Developer Disk Image (once
+  someone points the app at the two image files - not yet exposed in the UI,
+  only the Rust command exists) is enough, and location simulation should work
+  end to end.
+- None of this has been exercised against real hardware from this environment
+  (no iPad, no USB passthrough here) - the Rust and TypeScript code compiles,
+  type-checks, and its pure logic (coordinate math/validation) is unit-tested,
+  and the "no device / no Apple services installed" path has been verified
+  end-to-end (see below), but the actual USB protocol exchange with a live
+  device needs verification on a real Windows machine with a real iPad.
+
+## What this means for the UI
+
+- `DeviceProvider` and `LocationProvider` are still plain interfaces with two
+  implementations each (mock, real), chosen once at startup
+  (`src/device/createDeviceProvider.ts`, `src/location/createLocationProvider.ts`)
+  based on whether the app is running inside Tauri. Swapping in the eventual
+  personalized-DDI flow means changing Rust internals behind `set_location`,
+  not the interface or the UI.
+- The Device and Settings pages always say which provider is active by name
+  ("Mock Device Provider" vs. "USB Device (idevice)") - nothing pretends a
+  simulated device is real, or vice versa.
+- Every failure path - no Apple Mobile Device Support installed, device not
+  trusted, Developer Mode off, Developer Disk Image not mounted, device locked
+  - surfaces the real error and a concrete next step, never a generic "failed"
+  or a silently-ignored no-op. This was verified directly: in this sandbox
+  (no Apple services installed at all, matching how a fresh Windows machine
+  looks before installing anything), clicking Connect produces exactly
+  "Could not reach the Apple USB device service" with the install instructions
+  in the UI, and the app keeps running normally.
