@@ -58,13 +58,18 @@ export function MapView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep the current-location marker in sync, and gently follow it while
-  // movement is active so the joystick/keyboard controls stay visible.
+  // Keep the current-location marker in sync. While movement is active,
+  // pan gently so the joystick/keyboard controls stay visible; otherwise
+  // (e.g. a "Set Test Location" teleport) fly to the new spot so it's
+  // never left off-screen.
   useEffect(() => {
     currentMarkerRef.current?.setLngLat([current.longitude, current.latitude]);
     const map = mapRef.current;
-    if (map && useLocationStore.getState().movementActive) {
+    if (!map) return;
+    if (useLocationStore.getState().movementActive) {
       map.panTo([current.longitude, current.latitude], { duration: 200 });
+    } else {
+      map.flyTo({ center: [current.longitude, current.latitude], duration: 800 });
     }
   }, [current]);
 
