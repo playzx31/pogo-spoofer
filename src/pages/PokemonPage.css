@@ -1,0 +1,25 @@
+.pokemon-page {
+  height: 100%;
+  padding: 16px;
+  display: flex;
+}
+
+.pokemon-page__panel {
+  padding: 20px;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pokemon-page__panel p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.pokemon-page__note {
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}

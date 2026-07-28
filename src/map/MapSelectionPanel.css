@@ -1,0 +1,47 @@
+.map-selection-panel {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  width: 260px;
+  padding: 14px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.map-selection-panel__close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px;
+}
+
+.map-selection-panel__close:hover {
+  color: var(--text-primary);
+}
+
+.map-selection-panel__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.map-selection-panel__row .mono {
+  font-size: 13px;
+}
+
+.map-selection-panel__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.map-selection-panel__actions .btn {
+  flex: 1;
+}
