@@ -45,6 +45,7 @@ pub fn run() {
             location::set_location,
             location::clear_location,
             location::get_location_status,
+            location::get_location_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

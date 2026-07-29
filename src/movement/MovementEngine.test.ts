@@ -157,17 +157,43 @@ describe("MovementEngine", () => {
   it("refuses to tick when the configured speed would produce a giant, teleport-sized jump", async () => {
     const onTick = vi.fn().mockReturnValue(true);
     const onSafetyStop = vi.fn();
-    // An absurd/corrupted speed value (e.g. bad persisted settings) - at any
-    // sane walking/running/cycling speed a single 300ms tick moves a few
-    // meters at most, nowhere near the MAX_TICK_DISTANCE_KM backstop.
+    // An absurd/corrupted speed value (e.g. bad persisted settings). The
+    // first tick has ~0 elapsed time (fires immediately on start) so it's
+    // harmless; the second tick, ~300ms of real elapsed time later, is
+    // where an absurd speed turns into an unsafe distance.
     const engine = new MovementEngine(() => ({ latitude: 0, longitude: 0 }), onTick, 1_000_000_000, onSafetyStop);
 
     engine.start("N");
     await vi.advanceTimersByTimeAsync(0);
+    expect(onTick).toHaveBeenCalledTimes(1);
 
-    expect(onTick).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onTick).toHaveBeenCalledTimes(1); // no second call - aborted before reaching onTick
     expect(onSafetyStop).toHaveBeenCalledWith(expect.stringContaining("unsafe"));
     expect(engine.isMoving).toBe(false);
+  });
+
+  it("refuses to tick if the system clock moves backward between ticks", async () => {
+    const onTick = vi.fn().mockReturnValue(true);
+    const onSafetyStop = vi.fn();
+    const engine = new MovementEngine(() => ({ latitude: 0, longitude: 0 }), onTick, 5, onSafetyStop);
+
+    const dateNowSpy = vi.spyOn(Date, "now");
+    let now = 1_000_000;
+    dateNowSpy.mockImplementation(() => now);
+
+    engine.start("N");
+    now += 100;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onTick).toHaveBeenCalledTimes(1);
+
+    now -= 5_000; // system clock jumped backward
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onTick).toHaveBeenCalledTimes(1);
+    expect(onSafetyStop).toHaveBeenCalledWith(expect.stringContaining("elapsed"));
+    expect(engine.isMoving).toBe(false);
+
+    dateNowSpy.mockRestore();
   });
 
   it("always reads the live current position at tick time rather than a cached start position (no resume-from-old-position bug)", async () => {
@@ -199,21 +225,14 @@ describe("MovementEngine", () => {
     expect(seenLatitudes[1]).toBeCloseTo(50, 6);
   });
 
-  it("moves the same distance per tick even if the system clock jumps between ticks (no delta-time-based jump)", async () => {
-    // The engine must derive each tick's distance purely from the
-    // configured speed and its fixed tick interval - never from measuring
-    // real elapsed time - so a system clock jump (sleep/resume, NTP
-    // correction) can never turn into an oversized or negative step. This
-    // is a regression guard: it mocks Date.now() to jump wildly between
-    // calls and asserts the tick distance is completely unaffected, which
-    // would only fail if delta-time-based math were introduced later.
+  it("computes each tick's distance from real elapsed time, not an assumed fixed interval", async () => {
+    // A slow USB round trip (or any other delay) between when one
+    // coordinate is generated and the next tick fires must not distort the
+    // configured speed - the distance sent has to reflect how much time
+    // actually passed, not the nominal ~300ms pacing interval.
     const dateNowSpy = vi.spyOn(Date, "now");
-    let call = 0;
-    dateNowSpy.mockImplementation(() => {
-      call += 1;
-      // Wildly different "elapsed time" on every read.
-      return call % 2 === 0 ? 0 : 10_000_000;
-    });
+    let now = 0;
+    dateNowSpy.mockImplementation(() => now);
 
     const destinations: { latitude: number; longitude: number }[] = [];
     let position = { latitude: 0, longitude: 0 };
@@ -224,19 +243,22 @@ describe("MovementEngine", () => {
         position = next;
         return true;
       },
-      36,
+      36, // 36 km/h
     );
 
-    engine.start("N");
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(300);
-    await vi.advanceTimersByTimeAsync(300);
+    engine.start("N"); // lastTickAt = 0
+    await vi.advanceTimersByTimeAsync(0); // tick 1: ~0ms elapsed -> ~0 distance
+    expect(destinations[0].latitude).toBeCloseTo(0, 9);
+
+    now = 1000; // simulate a slow ~1000ms round trip before tick 2 executes
+    await vi.advanceTimersByTimeAsync(300); // scheduled 300ms later regardless
+    const earthRadiusKm = 6371.0088;
+    const expectedDistanceKm = 36 * (1000 / 3_600_000); // 0.01 km
+    const expectedDegrees = (expectedDistanceKm / earthRadiusKm) * (180 / Math.PI);
+    expect(destinations[1].latitude).toBeCloseTo(expectedDegrees, 6);
+
     engine.stop();
     dateNowSpy.mockRestore();
-
-    const firstStep = destinations[1].latitude - destinations[0].latitude;
-    const secondStep = destinations[2].latitude - destinations[0].latitude - firstStep;
-    expect(firstStep).toBeCloseTo(secondStep, 12);
   });
 
   it("stop() halts future ticks immediately", async () => {

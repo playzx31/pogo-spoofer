@@ -1,6 +1,7 @@
 import { Badge } from "../components/common/Badge";
 import { useDeviceStore } from "../state/deviceStore";
 import type { MockScenario } from "../device/MockDeviceProvider";
+import { LocationDiagnosticsPanel } from "../location/LocationDiagnosticsPanel";
 import "./DevicePage.css";
 
 const SCENARIOS: { value: MockScenario; label: string }[] = [
@@ -87,6 +88,8 @@ export function DevicePage() {
           </div>
         </div>
       </div>
+
+      {!isMockProvider && status.device?.udid && <LocationDiagnosticsPanel udid={status.device.udid} />}
 
       {isMockProvider ? (
         <div className="device-page__card panel">

@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Joystick } from "./Joystick";
 import { SpeedSelector, type SpeedMode } from "./SpeedSelector";
 import { useMovementEngine } from "./useMovementEngine";
-import { useKeyboardMovement } from "./useKeyboardMovement";
+import { useMovementInput } from "./useMovementInput";
 import type { CompassDirection } from "./directions";
 import { useLocationStore } from "../state/locationStore";
 import { useSettingsStore } from "../state/settingsStore";
@@ -37,7 +37,12 @@ export function MovementPanel() {
   const start = (direction: CompassDirection) => engine.start(direction);
   const stop = () => engine.stop();
 
-  const { heldDirections } = useKeyboardMovement({ start, stop, enabled: true });
+  const { heldDirections, pointerDirection, pointerStart, pointerStop, stopAll } = useMovementInput({ start, stop, enabled: true });
+
+  const activeDirections = useMemo(() => {
+    if (!pointerDirection || heldDirections.has(pointerDirection)) return heldDirections;
+    return new Set([...heldDirections, pointerDirection]);
+  }, [heldDirections, pointerDirection]);
 
   const handleManualSet = () => {
     const lat = parseFloat(manualLat);
@@ -59,7 +64,7 @@ export function MovementPanel() {
   return (
     <div className="movement-panel panel">
       <div className="movement-panel__body">
-        <Joystick activeDirections={heldDirections} onStart={start} onStop={stop} />
+        <Joystick activeDirections={activeDirections} onStart={pointerStart} onStop={pointerStop} />
 
         <div className="movement-panel__stats">
           <div className="movement-panel__stats-grid">
@@ -74,7 +79,7 @@ export function MovementPanel() {
 
       <div className="movement-panel__controls">
         <SpeedSelector mode={mode} onModeChange={setMode} customKmh={speeds.customKmh} onCustomChange={(v) => setSpeed("customKmh", v)} />
-        <button className="btn btn-danger" onClick={stop} disabled={!movementActive}>
+        <button className="btn btn-danger" onClick={stopAll} disabled={!movementActive}>
           STOP
         </button>
       </div>

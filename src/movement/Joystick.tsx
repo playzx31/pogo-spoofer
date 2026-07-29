@@ -1,4 +1,4 @@
-import { useState, type PointerEvent } from "react";
+import type { PointerEvent } from "react";
 
 import { HEADING_ARROWS, type CompassDirection } from "./directions";
 import "./Joystick.css";
@@ -6,11 +6,11 @@ import "./Joystick.css";
 const GRID: (CompassDirection | null)[] = ["NW", "N", "NE", "W", null, "E", "SW", "S", "SE"];
 
 /**
- * `activeDirections` (from the keyboard hook) and this component's own
- * pointer-driven `pointerDirection` are independent input sources that must
- * both be able to light up a button - e.g. holding W on the keyboard while
- * also dragging the joystick's E button should show both as active. Neither
- * one clears the other.
+ * A controlled component: all "what's currently active" state
+ * (`activeDirections`) lives in the parent's `useMovementInput`, not here.
+ * That's what lets STOP reset the joystick's visual state too - there is no
+ * internal state here that could keep a button looking pressed after STOP
+ * or a lost pointer event.
  */
 export function Joystick({
   activeDirections,
@@ -21,25 +21,16 @@ export function Joystick({
   onStart: (direction: CompassDirection) => void;
   onStop: () => void;
 }) {
-  const [pointerDirection, setPointerDirection] = useState<CompassDirection | null>(null);
-
   const handlePointerDown = (direction: CompassDirection) => (e: PointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    setPointerDirection(direction);
     onStart(direction);
   };
 
-  const handlePointerUp = () => {
-    setPointerDirection(null);
-    onStop();
-  };
+  const handlePointerUp = () => onStop();
 
   const handlePointerLeave = (e: PointerEvent<HTMLButtonElement>) => {
-    if (e.buttons === 0) {
-      setPointerDirection(null);
-      onStop();
-    }
+    if (e.buttons === 0) onStop();
   };
 
   return (
@@ -54,9 +45,7 @@ export function Joystick({
             <button
               key={direction}
               type="button"
-              className={`joystick__btn joystick__btn--${direction}${
-                activeDirections.has(direction) || pointerDirection === direction ? " is-active" : ""
-              }`}
+              className={`joystick__btn joystick__btn--${direction}${activeDirections.has(direction) ? " is-active" : ""}`}
               onPointerDown={handlePointerDown(direction)}
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerUp}

@@ -19,6 +19,7 @@ SQLite for local history/logging.
 - [Trust / pairing](#trust--pairing)
 - [Developer requirements (Developer Mode + Developer Disk Image)](#developer-requirements-developer-mode--developer-disk-image)
 - [How to run](#how-to-run)
+- [Movement architecture](#movement-architecture)
 - [Hardware diagnostic](#hardware-diagnostic)
 - [How to build a Windows .exe](#how-to-build-a-windows-exe)
 - [Troubleshooting](#troubleshooting)
@@ -156,27 +157,49 @@ cargo test         # Rust: coordinate validation, distance calculations, READY-s
 cargo clippy --all-targets -- -D warnings
 ```
 
+## Movement architecture
+
+Teleport, the on-screen joystick, and W/A/S/D all drive the same
+`MovementEngine` and the same `set_location` backend - never separate/fake
+movement paths. Ticks are self-paced (never overlapping a real device round
+trip) and compute each step's distance from real elapsed time rather than
+assuming a fixed interval, so a slow USB round trip never distorts the
+configured speed. Held-key and joystick-pointer state live in one hook
+(`useMovementInput`) so STOP can clear both together, and so a key or button
+still physically held at the moment STOP is clicked can never resume
+movement afterward. See [`docs/LOCATION_PROVIDERS.md`](docs/LOCATION_PROVIDERS.md#movement-architecture)
+for the full breakdown, including a past bug (unstable callback identities
+tearing down the input listeners on every successful tick) that used to make
+continuous movement die after about one step - fixed, with a regression test
+locking in the fix.
+
 ## Hardware diagnostic
 
 Verifying the real iOS 17+/18 location path (CoreDeviceProxy tunnel -> RSD ->
 DVT -> LocationSimulation) needs a physical device - unit tests alone can't
 prove a live USB protocol exchange works. `cargo run --bin diagnose` runs the
-exact same device/location code the app uses, one stage at a time, against
-whatever's attached, and prints a real PASS/FAIL for each - no GUI required:
+exact same device/location code the app uses against whatever's attached and
+prints a real PASS/FAIL for each step - no GUI required:
 
 ```powershell
 cd src-tauri
-cargo run --bin diagnose                  # first device usbmuxd reports
-cargo run --bin diagnose -- <UDID>        # a specific device, if more than one
+cargo run --bin diagnose                              # 8-stage connectivity check
+cargo run --bin diagnose -- <UDID>                    # a specific device, if more than one
+cargo run --bin diagnose -- --movement-test           # Apple Maps hardware test: repeated updates
+cargo run --bin diagnose -- --movement-test <UDID>
 ```
 
-It checks Apple USB service reachability, device detection, pairing/trust,
-Developer Mode + Developer Disk Image, the modern tunnel, RSD/DVT service
-discovery, setting one nearby test coordinate, and clearing it - stopping and
-marking the remaining stages `SKIP` the moment one fails, since each depends
-on the one before it. Exit code is `0` only if every stage passed. See
+The default mode checks Apple USB service reachability, device detection,
+pairing/trust, Developer Mode + Developer Disk Image, the modern tunnel,
+RSD/DVT service discovery, setting one nearby test coordinate, and clearing
+it - stopping and marking the remaining stages `SKIP` the moment one fails.
+`--movement-test` proves *repeated* updates work (what continuous movement
+actually needs): five sequential coordinates stepping north, each waited on
+before the next is sent, then a clear - printing PASS/FAIL, the coordinate,
+and elapsed time for every write. Exit code is `0` only if every
+stage/step passed. See
 [`docs/LOCATION_PROVIDERS.md`](docs/LOCATION_PROVIDERS.md#hardware-diagnostic)
-for what each stage actually does.
+for what each stage/step actually does.
 
 ## How to build a Windows .exe
 
@@ -229,6 +252,18 @@ The joystick/keyboard movement engine calls the real device on every step and
 stops immediately if a call fails, rather than continuing to move the map
 locally while the device silently rejects the updates - check the Logs tab
 for the specific error (usually one of the above).
+
+**Apple Maps shows the injected location, but an individual app doesn't**
+This app can only confirm and control what the iPad's location-simulation
+service reports at the OS level - a specific app (including, but not
+limited to, Pokémon GO) accepting or rejecting that simulated location is a
+separate question this app doesn't control, and this README makes no claim
+either way about compatibility with any specific app. The Device tab's
+"Location Delivery Diagnostics" (developer) panel shows exactly what the
+protocol reported for the last request - backend used, whether the session
+is still active, success/failure - which is the place to look when Apple
+Maps and another app disagree. See [`docs/LOCATION_PROVIDERS.md`](docs/LOCATION_PROVIDERS.md#location-delivery-diagnostics)
+for the full investigation into what can cause this and why.
 
 **Build fails with a linker error on Windows**
 The C++ Build Tools workload (see [Windows requirements](#windows-requirements))

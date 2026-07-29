@@ -14,17 +14,25 @@ export type MovementTickHandler = (
   deltaKm: number,
 ) => Promise<boolean | void> | boolean | void;
 
-const TICK_MS = 300;
+/**
+ * Target pacing between the end of one tick and the start of the next -
+ * purely a rate limit ("don't flood the device"), not the basis for the
+ * distance math. `runTick` measures real elapsed time instead of assuming
+ * this interval happened exactly, since the real `LocationProvider` does a
+ * USB round trip per call that can run faster or slower than this.
+ */
+const TICK_INTERVAL_MS = 300;
 
 /**
  * Absolute backstop on how far a single tick may move, independent of the
- * configured speed. Real per-tick distances at any sane walking/running/
- * cycling/custom speed are a few meters at most (see `TICK_MS`); this only
- * exists to catch a corrupted or out-of-bounds speed value (e.g. bad
- * persisted settings) before it turns into a teleport-sized jump sent to a
- * real device.
+ * configured speed or how much real time elapsed. Real per-tick distances at
+ * any sane walking/running/cycling/custom speed, even accounting for a slow
+ * multi-second USB round trip, are a small fraction of this; it exists to
+ * catch a corrupted speed value or a very long stall (e.g. the app was
+ * suspended) before it turns into a teleport-sized jump sent to a real
+ * device instead of a smooth step.
  */
-const MAX_TICK_DISTANCE_KM = 5;
+const MAX_TICK_DISTANCE_KM = 1;
 
 /**
  * Pure, UI-agnostic engine that turns "a direction is being held at a given
@@ -42,13 +50,17 @@ const MAX_TICK_DISTANCE_KM = 5;
  * `LocationProvider` does a USB round trip per call, which can take longer
  * than the tick interval, and firing the next request before the last one
  * finished would both flood the device and risk answers arriving out of
- * order.
+ * order. The distance for each tick is computed from the *real* elapsed
+ * time since the previous one (not an assumed fixed interval), so a slow
+ * round trip doesn't distort the effective speed - see `runTick`.
  */
 export class MovementEngine {
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private ticking = false;
   private direction: CompassDirection | null = null;
   private speedKmh: number;
+  /** Timestamp (`Date.now()`) the last tick's distance was measured from, or `null` when idle. */
+  private lastTickAt: number | null = null;
 
   constructor(
     private readonly getPosition: () => Coordinates,
@@ -57,11 +69,11 @@ export class MovementEngine {
     /**
      * Called instead of `onTick` when the engine refuses to compute a tick
      * because its inputs are unsafe to move from (an invalid current
-     * position, an invalid speed, or a computed destination/distance that
-     * doesn't check out) - i.e. "movement state is unknown, so stop instead
-     * of guessing" rather than sending a real device a garbage or
-     * teleport-sized coordinate. The engine always stops immediately after
-     * calling this; it never retries automatically.
+     * position, an invalid speed, an invalid elapsed time, or a computed
+     * destination/distance that doesn't check out) - i.e. "movement state
+     * is unknown, so stop instead of guessing" rather than sending a real
+     * device a garbage or teleport-sized coordinate. The engine always
+     * stops immediately after calling this; it never retries automatically.
      */
     private readonly onSafetyStop?: (reason: string) => void,
   ) {
@@ -80,11 +92,13 @@ export class MovementEngine {
     const alreadyRunning = this.direction !== null;
     this.direction = direction;
     if (alreadyRunning) return; // just changed direction mid-hold
+    this.lastTickAt = Date.now();
     this.scheduleTick(0);
   }
 
   stop() {
     this.direction = null;
+    this.lastTickAt = null;
     if (this.timerId !== null) {
       clearTimeout(this.timerId);
       this.timerId = null;
@@ -101,18 +115,23 @@ export class MovementEngine {
   /**
    * Stops the engine without ever calling `onTick`, reporting why via
    * `onSafetyStop`. Used when the inputs to a tick can't be trusted - an
-   * unknown/invalid position, speed, or destination is a reason to halt, not
-   * a value to send to a real device and hope for the best.
+   * unknown/invalid position, speed, elapsed time, or destination is a
+   * reason to halt, not a value to send to a real device and hope for the
+   * best.
    */
   private abortTick(reason: string) {
     this.direction = null;
     this.ticking = false;
+    this.lastTickAt = null;
     this.onSafetyStop?.(reason);
   }
 
   private async runTick() {
     if (!this.direction || this.ticking) return;
     this.ticking = true;
+
+    const now = Date.now();
+    const elapsedMs = now - (this.lastTickAt ?? now);
 
     const position = this.getPosition();
     if (!isValidCoordinate(position)) {
@@ -125,10 +144,19 @@ export class MovementEngine {
       return;
     }
 
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+      // A negative reading means the system clock moved backward between
+      // ticks (NTP correction, manual clock change) - trusting it would
+      // either compute a negative distance or silently do nothing forever;
+      // stopping and surfacing it is safer than guessing which.
+      this.abortTick(`elapsed time since the last tick is invalid (${elapsedMs}ms)`);
+      return;
+    }
+
     const bearing = HEADING_DEGREES[this.direction];
-    const distanceKm = this.speedKmh * (TICK_MS / 3_600_000);
+    const distanceKm = this.speedKmh * (elapsedMs / 3_600_000);
     if (!Number.isFinite(distanceKm) || distanceKm > MAX_TICK_DISTANCE_KM) {
-      this.abortTick(`computed tick distance is unsafe (${distanceKm} km at ${this.speedKmh} km/h)`);
+      this.abortTick(`computed tick distance is unsafe (${distanceKm} km over ${elapsedMs}ms at ${this.speedKmh} km/h)`);
       return;
     }
 
@@ -137,6 +165,11 @@ export class MovementEngine {
       this.abortTick(`computed destination is invalid (${next.latitude}, ${next.longitude})`);
       return;
     }
+
+    // Recorded now (before the tick is sent) so the *next* tick's elapsed
+    // time is measured from this coordinate's generation, not from whenever
+    // the device happens to acknowledge it.
+    this.lastTickAt = now;
 
     let shouldContinue = true;
     try {
@@ -149,9 +182,10 @@ export class MovementEngine {
 
     this.ticking = false;
     if (shouldContinue && this.direction) {
-      this.scheduleTick(TICK_MS);
+      this.scheduleTick(TICK_INTERVAL_MS);
     } else {
       this.direction = null;
+      this.lastTickAt = null;
     }
   }
 }

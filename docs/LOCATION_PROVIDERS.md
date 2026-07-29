@@ -111,7 +111,14 @@ error as described above.
 
 - On a real iPadOS 18.7.8 device (this project's reference hardware) with
   Developer Mode on and a Developer Disk Image mounted, `set_location`/
-  `clear_location` should succeed via the modern path end to end.
+  `clear_location` should succeed via the modern path end to end - confirmed
+  on that hardware for a single teleport, with Apple Maps visibly showing
+  the injected location. Continuous updates (held-key/joystick movement)
+  repeat that same call on a timer (see [Movement
+  architecture](#movement-architecture)); whether an individual app like
+  Pokémon GO accepts the result is a separate question from whether the
+  device does - see [Location delivery
+  diagnostics](#location-delivery-diagnostics).
 - On iOS 16 and earlier, mounting the classic Developer Disk Image (once
   someone points the app at the two image files - not yet exposed in the UI,
   only the Rust command exists) is enough, and the legacy path handles it.
@@ -128,21 +135,130 @@ error as described above.
   [Hardware diagnostic](#hardware-diagnostic) below for how to do that
   without needing to click through the GUI at all.
 
+## Movement architecture
+
+Teleport ("Set Test Location"), the on-screen joystick, and W/A/S/D all
+drive the *same* engine and the *same* `set_location` backend - there is no
+separate "fake" movement path:
+
+- **`useMovementInput`** (`src/movement/useMovementInput.ts`) owns every
+  "is a movement input currently held" source - keyboard keys and the
+  joystick pointer - in one place. Its window-level keydown/keyup/blur/
+  visibilitychange listeners are attached exactly once (via a stable `[enabled]`
+  effect dependency) and read the current `start`/`stop` callbacks through
+  refs rather than closing over them directly.
+
+  This matters: `MovementPanel` re-renders on every successful movement tick
+  (it reads the live position/heading from the store), which recreates
+  `start`/`stop` as new function identities every time. An earlier version
+  of this hook depended on those identities directly, so React tore the
+  listeners down and rebuilt them - running the old cleanup, which
+  unconditionally called `stop()` and reset all held-key state - on every
+  single tick. That is why continuous movement used to die after about one
+  tick for both keyboard and joystick input, and why W/A/S/D never reliably
+  showed as held: the act of moving successfully once immediately stopped
+  itself. Reading `start`/`stop` through refs fixed both symptoms with one
+  change, since they shared the same root cause.
+- **`MovementEngine`** (`src/movement/MovementEngine.ts`) self-paces ticks
+  (never overlapping - it waits for one `set_location` round trip to settle
+  before scheduling the next) and computes each tick's distance from the
+  *real* elapsed time since the previous tick (`Date.now()` deltas), not an
+  assumed fixed interval - a slow USB round trip no longer distorts the
+  effective speed. It refuses to compute a tick at all (calling
+  `onSafetyStop` instead of `onTick`) when the current position, configured
+  speed, elapsed time, or computed destination doesn't check out, rather
+  than sending a real device a guess.
+- **STOP** (`useMovementInput`'s `stopAll`) clears held keyboard keys, the
+  held pointer direction, and the engine's pending tick together - a key or
+  the joystick button still being physically held at the moment STOP is
+  clicked can never resume movement afterward. It stops the engine only; it
+  never teleports elsewhere and never clears the simulated location.
+
+## Location delivery diagnostics
+
+The iPad's system location (and Apple Maps) can accept a simulated location
+successfully while an *individual app* on the device still fails to get a
+location fix from it - those are different questions, and this app answers
+them separately rather than inferring one from the other.
+
+**`get_location_diagnostics`** (Rust, `location/real.rs`) tracks, per
+device, what the location-simulation *protocol* actually reported for the
+last request: the requested coordinate, which backend handled it (modern vs.
+legacy), a timestamp, whether the request succeeded, and whether a modern
+session is still cached (alive) for that device. This is distinct from
+`get_location_status` (\"what we last told the device to show\") - it is
+"what actually happened at the protocol level", surfaced in a collapsible
+developer panel on the Device tab. It only shows whether **the iPad**
+accepted the request; it says nothing about whether any specific app is
+using the result, and the UI copy is written to keep that distinction
+explicit rather than imply Pokémon GO compatibility from an Apple Maps
+success.
+
+### Investigating "Failed to detect location" in an individual app
+
+`idevice`'s own `LocationSimulationClient` documentation states plainly:
+*"a connection must be maintained to keep location simulated"* - the DVT
+channel is not a one-shot fire-and-forget request, it is a live session that
+has to stay open for the simulated location to keep being reported. Mapped
+onto the app's own investigation categories:
+
+- **(A) persistent after the initial set request?** Only as long as the
+  session (the `RemoteServerClient`/tunnel) stays alive - not indefinitely
+  on its own.
+- **(B) one-shot?** No - per the crate's own documentation, one `set()` call
+  does not guarantee a location stays simulated once the connection that
+  sent it closes.
+- **(C) dependent on a persistent developer-service session staying alive?**
+  **Yes** - this is the crate's own stated model, and it's why
+  `LocationManager` (`real.rs`) caches a `ModernLocationSession` per device
+  UDID and reuses it across every `set_location`/`clear_location` call
+  (including every movement tick) instead of reconnecting each time; a
+  prerequisite-related failure drops the cached session so the next attempt
+  starts clean rather than repeatedly hitting a broken one.
+- **(D) cleared/replaced unexpectedly after the call returns?** Not by this
+  app's own code once (C) is implemented correctly - but it is exactly what
+  a genuine session drop (device sleep, a transient USB hiccup, an error on
+  a later call that tears the cached session down) would look like from an
+  app on the device that expects a continuously live fix.
+
+**A concrete, previously-real contributor to this symptom**: until the
+`useMovementInput` fix described above, held-key/joystick movement only
+produced a single tick before silently stopping - meaning the simulated
+location was set *once* and then never refreshed again, even while the UI
+still showed "Moving". A real GPS fix's timestamp updates continuously, even
+while stationary; a location that was set once and never touched again is
+exactly the kind of stale, non-updating fix an app's own location-freshness
+check could plausibly reject even while Apple Maps (which may not enforce
+the same freshness check, or may cache the last displayed point) continues
+to show it correctly. With continuous movement now actually continuous, the
+device receives a steady stream of fresh updates while held-key movement is
+active; whether that alone resolves an individual app's "failed to detect
+location" report is exactly the kind of thing the diagnostics above and the
+hardware movement test below are for confirming on real hardware, not
+something to claim resolved from this environment. No stationary
+"keep-alive while idle" refresh has been added speculatively - that would
+be indistinguishable in intent from working around an individual app's own
+checks, which is explicitly out of scope; see [Scope and
+limits](../README.md#scope-and-limits).
+
 ## Hardware diagnostic
 
 `src-tauri/src/diagnostics.rs` runs the exact same device/location code the
-app itself uses, stage by stage, against a real attached device, and reports
-a real PASS/FAIL for each - never a faked result. `src/bin/diagnose.rs` is
-its CLI entry point:
+app itself uses against a real attached device and reports a real PASS/FAIL
+for each step - never a faked result. `src/bin/diagnose.rs` is its CLI entry
+point, with two modes:
 
 ```powershell
 cd src-tauri
-cargo run --bin diagnose                  # first device usbmuxd reports
-cargo run --bin diagnose -- <UDID>        # a specific device
+cargo run --bin diagnose                              # 8-stage connectivity check
+cargo run --bin diagnose -- <UDID>                    # ...against a specific device
+cargo run --bin diagnose -- --movement-test           # Apple Maps hardware test
+cargo run --bin diagnose -- --movement-test <UDID>
 ```
 
-It checks, in order (stopping and marking the rest `SKIP` the moment one
-fails, since each stage depends on the one before it):
+**Default mode** (`diagnostics::run`) checks, in order (stopping and marking
+the rest `SKIP` the moment one fails, since each stage depends on the one
+before it):
 
 1. Apple USB service (usbmuxd) reachable
 2. Device detected
@@ -154,11 +270,19 @@ fails, since each stage depends on the one before it):
    at; harmless, obviously a test point)
 8. Clear location
 
-Exit code is `0` only if every stage passed, so it can be scripted/CI-gated
-without parsing its text output. This is the tool to run after connecting
-the reference iPad (or any iOS device) to get a real, staged answer for
-"does the modern location path actually work on this hardware" - no GUI
-clicking required.
+**`--movement-test`** (`diagnostics::run_movement_test`) - the "Apple Maps
+hardware test" - proves *repeated* updates work, which the default mode
+alone can't: after confirming the device is detected and READY, it sets
+five sequential coordinates stepping north by about 100m each (a plausible
+walking-speed step, not a teleport), waiting for each to succeed before
+sending the next, then clears. Every write prints PASS/FAIL, the requested
+coordinate, the elapsed time for that specific request, and the backend
+used - so a real, continuous stream of location updates can be proven
+against hardware independently of the GUI, exactly what held-key/joystick
+movement does over USB in practice.
+
+Exit code is `0` only if every stage/step passed, so either mode can be
+scripted/CI-gated without parsing its text output.
 
 ## What this means for the UI
 

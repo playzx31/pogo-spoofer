@@ -92,3 +92,17 @@
   color: var(--text-secondary);
   line-height: 1.5;
 }
+
+.device-page__diagnostics-summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.device-page__diagnostics-summary::-webkit-details-marker {
+  display: none;
+}
+
+details[open] > .device-page__diagnostics-summary {
+  border-bottom: 1px solid var(--border-subtle);
+}

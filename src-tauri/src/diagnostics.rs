@@ -235,6 +235,189 @@ pub async fn run(udid: Option<&str>) -> DiagnosticReport {
     DiagnosticReport { stages: rec.stages }
 }
 
+/// A single coordinate write during the repeated-movement test, with its
+/// real outcome and how long the device actually took to respond - the
+/// per-request timing the "Apple Maps hardware test" needs to show movement
+/// updates are being delivered continuously, not just once.
+#[derive(Debug, Clone)]
+pub struct MovementStep {
+    pub label: &'static str,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub outcome: StageOutcome,
+    pub detail: String,
+    pub elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MovementTestReport {
+    /// Device-detected/READY prerequisites, checked before any movement is
+    /// attempted - same idea as `DiagnosticReport`'s first stages, just
+    /// collapsed to two since this report's focus is the movement sequence.
+    pub connection: Vec<StageResult>,
+    /// Which backend handled the sequence, once a session was established.
+    pub backend: Option<&'static str>,
+    pub movement: Vec<MovementStep>,
+}
+
+impl MovementTestReport {
+    /// PASS only if every connection prerequisite AND every movement step
+    /// (including the final clear) actually succeeded.
+    pub fn all_passed(&self) -> bool {
+        !self.connection.is_empty()
+            && self.connection.iter().all(|s| s.outcome == StageOutcome::Pass)
+            && !self.movement.is_empty()
+            && self.movement.iter().all(|s| s.outcome == StageOutcome::Pass)
+    }
+}
+
+/// One "step" of latitude north of `TEST_COORDINATE` per movement update -
+/// about 100m, a plausible walking-speed step, not a teleport-sized jump.
+const MOVEMENT_STEP_DEGREES: f64 = 0.0009;
+const MOVEMENT_STEP_LABELS: [&str; 5] = ["A", "B", "C", "D", "E"];
+
+/// The "Apple Maps hardware test": proves *repeated* real-device location
+/// updates work independently of the GUI - set A, wait, set B a short
+/// distance north, wait, set C, and so on, then clear - printing PASS/FAIL,
+/// the requested coordinate, elapsed time, and backend for every write. This
+/// is what distinguishes "one location update reached the device" (which
+/// `run` above already proves) from "a continuous stream of updates
+/// reaches the device", which is what real movement (and, on the device
+/// side, whether a location fix stays fresh) actually needs.
+pub async fn run_movement_test(udid: Option<&str>) -> MovementTestReport {
+    let mut connection = Vec::new();
+
+    let mut usbmuxd = match UsbmuxdConnection::default().await {
+        Ok(u) => u,
+        Err(e) => {
+            connection.push(StageResult { name: "Device detected", outcome: StageOutcome::Fail, detail: describe_error(&e).message });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    let addr = match usbmuxd_addr() {
+        Ok(a) => a,
+        Err(e) => {
+            connection.push(StageResult { name: "Device detected", outcome: StageOutcome::Fail, detail: e.message });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    let raw_devices = match usbmuxd.get_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            connection.push(StageResult { name: "Device detected", outcome: StageOutcome::Fail, detail: describe_error(&e).message });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    let dev = match udid {
+        Some(id) => raw_devices.iter().find(|d| d.udid == id).cloned(),
+        None => raw_devices.first().cloned(),
+    };
+    let dev = match dev {
+        Some(d) => d,
+        None => {
+            connection.push(StageResult { name: "Device detected", outcome: StageOutcome::Fail, detail: "No device attached".into() });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    connection.push(StageResult { name: "Device detected", outcome: StageOutcome::Pass, detail: format!("UDID {}", dev.udid) });
+
+    let pairing_file = match usbmuxd.get_pair_record(&dev.udid).await {
+        Ok(p) => p,
+        Err(_) => {
+            connection.push(StageResult { name: "READY", outcome: StageOutcome::Fail, detail: "not paired/trusted".into() });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    let provider = dev.to_provider(addr, APP_LABEL);
+    let mut lockdown = match LockdownClient::connect(&provider).await {
+        Ok(l) => l,
+        Err(e) => {
+            connection.push(StageResult { name: "READY", outcome: StageOutcome::Fail, detail: describe_error(&e).message });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    if let Err(e) = lockdown.start_session(&pairing_file).await {
+        connection.push(StageResult { name: "READY", outcome: StageOutcome::Fail, detail: describe_error(&e).message });
+        return MovementTestReport { connection, ..Default::default() };
+    }
+
+    let (dev_mode, mounted) = check_developer_readiness(&provider).await;
+    if dev_mode != Some(true) || mounted != Some(true) {
+        connection.push(StageResult {
+            name: "READY",
+            outcome: StageOutcome::Fail,
+            detail: format!("developer_mode_enabled={dev_mode:?}, developer_disk_image_mounted={mounted:?}"),
+        });
+        return MovementTestReport { connection, ..Default::default() };
+    }
+
+    let mut session = match ModernLocationSession::connect(&provider).await {
+        Ok(s) => s,
+        Err((stage, e)) => {
+            connection.push(StageResult {
+                name: "READY",
+                outcome: StageOutcome::Fail,
+                detail: format!("[{}] {}", stage.label(), describe_error(&e).message),
+            });
+            return MovementTestReport { connection, ..Default::default() };
+        }
+    };
+    connection.push(StageResult { name: "READY", outcome: StageOutcome::Pass, detail: "Developer Mode + Developer Disk Image + modern tunnel all confirmed".into() });
+
+    let mut movement = Vec::new();
+    let mut latitude = TEST_COORDINATE.0;
+    let longitude = TEST_COORDINATE.1;
+    for label in MOVEMENT_STEP_LABELS {
+        let started = std::time::Instant::now();
+        let result = session.set(latitude, longitude).await;
+        let elapsed_ms = started.elapsed().as_millis();
+        match result {
+            Ok(()) => movement.push(MovementStep {
+                label,
+                latitude,
+                longitude,
+                outcome: StageOutcome::Pass,
+                detail: "device accepted".into(),
+                elapsed_ms,
+            }),
+            Err((stage, e)) => {
+                movement.push(MovementStep {
+                    label,
+                    latitude,
+                    longitude,
+                    outcome: StageOutcome::Fail,
+                    detail: format!("[{}] {}", stage.label(), describe_error(&e).message),
+                    elapsed_ms,
+                });
+                return MovementTestReport { connection, backend: Some("modern"), movement };
+            }
+        }
+        latitude += MOVEMENT_STEP_DEGREES;
+    }
+
+    let started = std::time::Instant::now();
+    match session.clear().await {
+        Ok(()) => movement.push(MovementStep {
+            label: "clear",
+            latitude: 0.0,
+            longitude: 0.0,
+            outcome: StageOutcome::Pass,
+            detail: "device accepted clear-location request".into(),
+            elapsed_ms: started.elapsed().as_millis(),
+        }),
+        Err((stage, e)) => movement.push(MovementStep {
+            label: "clear",
+            latitude: 0.0,
+            longitude: 0.0,
+            outcome: StageOutcome::Fail,
+            detail: format!("[{}] {}", stage.label(), describe_error(&e).message),
+            elapsed_ms: started.elapsed().as_millis(),
+        }),
+    }
+
+    MovementTestReport { connection, backend: Some("modern"), movement }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +457,52 @@ mod tests {
         // An empty report means nothing actually ran - never treat "we
         // checked nothing" the same as "everything checked out fine".
         assert!(!DiagnosticReport::default().all_passed());
+    }
+
+    fn movement_step(label: &'static str, outcome: StageOutcome) -> MovementStep {
+        MovementStep { label, latitude: 0.0, longitude: 0.0, outcome, detail: String::new(), elapsed_ms: 0 }
+    }
+
+    #[test]
+    fn movement_test_all_passed_requires_connection_and_movement_to_both_succeed() {
+        let report = MovementTestReport {
+            connection: vec![stage("Device detected", StageOutcome::Pass), stage("READY", StageOutcome::Pass)],
+            backend: Some("modern"),
+            movement: vec![movement_step("A", StageOutcome::Pass), movement_step("clear", StageOutcome::Pass)],
+        };
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn movement_test_fails_if_a_connection_stage_failed() {
+        let report = MovementTestReport {
+            connection: vec![stage("Device detected", StageOutcome::Pass), stage("READY", StageOutcome::Fail)],
+            backend: None,
+            movement: vec![],
+        };
+        assert!(!report.all_passed());
+    }
+
+    #[test]
+    fn movement_test_fails_if_any_movement_step_failed() {
+        let report = MovementTestReport {
+            connection: vec![stage("Device detected", StageOutcome::Pass), stage("READY", StageOutcome::Pass)],
+            backend: Some("modern"),
+            movement: vec![movement_step("A", StageOutcome::Pass), movement_step("B", StageOutcome::Fail)],
+        };
+        assert!(!report.all_passed());
+    }
+
+    #[test]
+    fn movement_test_fails_if_movement_never_ran() {
+        // Connection succeeding alone isn't the point of this test - it
+        // exists to prove *repeated* updates work.
+        let report = MovementTestReport {
+            connection: vec![stage("Device detected", StageOutcome::Pass), stage("READY", StageOutcome::Pass)],
+            backend: None,
+            movement: vec![],
+        };
+        assert!(!report.all_passed());
     }
 
     #[test]
