@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { haversineDistanceKm, type Coordinates } from "../lib/geo";
+import { haversineDistanceKm, isValidCoordinate, type Coordinates } from "../lib/geo";
 import { createLocationProvider } from "../location/createLocationProvider";
 import type { LocationProvider } from "../location/LocationProvider";
 import { DEFAULT_LOCATION } from "../location/types";
@@ -75,6 +75,13 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     const { provider, current } = get();
     const old = current;
 
+    if (!isValidCoordinate(coords)) {
+      const friendly = toFriendlyError(new Error(`Invalid destination (${coords.latitude}, ${coords.longitude})`));
+      set({ lastError: friendly });
+      useLogStore.getState().log("error", "Set Test Location rejected", friendly.message);
+      throw new Error(friendly.message);
+    }
+
     try {
       await provider.setLocation(coords.latitude, coords.longitude);
     } catch (error) {
@@ -117,6 +124,15 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   selectPoint: (coords) => set({ selectedPoint: coords }),
 
   applyMovementTick: async (coords, heading, speedKmh, deltaKm) => {
+    // Defense in depth: `MovementEngine` already refuses to compute a tick
+    // from an invalid position/speed/destination (see its `onSafetyStop`
+    // path), but this store method is the single choke point every tick
+    // actually flows through before reaching a device, so it re-checks
+    // rather than trusting every possible caller to have done so.
+    if (!isValidCoordinate(coords) || !Number.isFinite(heading) || !Number.isFinite(speedKmh) || !Number.isFinite(deltaKm)) {
+      throw new Error(`Invalid movement tick (${coords.latitude}, ${coords.longitude}), heading=${heading}, speed=${speedKmh}, delta=${deltaKm}`);
+    }
+
     // Awaited (not fire-and-forget): the real provider does a USB round
     // trip per call, and the map/store must only reflect a position the
     // device actually confirmed - never one that merely looks correct

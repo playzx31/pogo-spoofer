@@ -31,6 +31,15 @@ interface SettingsState {
   resetDefaults: () => void;
 }
 
+/** Sane bounds for a configured movement speed - rejects NaN/negative values and an accidental extra digit (e.g. "1500" instead of "15") before they ever reach the movement engine. */
+const MIN_SPEED_KMH = 0.1;
+const MAX_SPEED_KMH = 300;
+
+function clampSpeed(kmh: number): number {
+  if (!Number.isFinite(kmh)) return MIN_SPEED_KMH;
+  return Math.min(MAX_SPEED_KMH, Math.max(MIN_SPEED_KMH, kmh));
+}
+
 const DEFAULTS: Pick<SettingsState, "units" | "speeds" | "travelTimer"> = {
   units: "mi",
   speeds: {
@@ -52,7 +61,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set) => ({
       ...DEFAULTS,
       setUnits: (units) => set({ units }),
-      setSpeed: (key, kmh) => set((state) => ({ speeds: { ...state.speeds, [key]: kmh } })),
+      setSpeed: (key, kmh) => set((state) => ({ speeds: { ...state.speeds, [key]: clampSpeed(kmh) } })),
       setTravelTimer: (patch) => set((state) => ({ travelTimer: { ...state.travelTimer, ...patch } })),
       resetDefaults: () => set({ ...DEFAULTS }),
     }),

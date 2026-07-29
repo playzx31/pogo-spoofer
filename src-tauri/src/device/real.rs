@@ -26,7 +26,7 @@ use super::DeviceInfo;
 /// attached/trusted devices has changed.
 pub const DEVICES_CHANGED_EVENT: &str = "devices-changed";
 
-const APP_LABEL: &str = "pogo-control-hub";
+pub(crate) const APP_LABEL: &str = "pogo-control-hub";
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -79,7 +79,7 @@ fn no_usbmuxd_error(e: IdeviceError) -> DeviceErrorInfo {
     }
 }
 
-fn usbmuxd_addr() -> Result<UsbmuxdAddr, DeviceErrorInfo> {
+pub(crate) fn usbmuxd_addr() -> Result<UsbmuxdAddr, DeviceErrorInfo> {
     UsbmuxdAddr::from_env_var().map_err(|e| DeviceErrorInfo {
         message: format!("Invalid USBMUXD_SOCKET_ADDRESS environment variable: {e}"),
         suggested_action: Some("Unset USBMUXD_SOCKET_ADDRESS to use the default.".into()),
@@ -312,7 +312,7 @@ async fn device_status_from_session(dev: &UsbmuxdDevice, lockdown: &mut Lockdown
 /// image mounter service can leave the device briefly unresponsive to
 /// lockdown per `idevice`'s own docs, so a throwaway lockdown query follows
 /// each check to restore normal responsiveness.
-async fn check_developer_readiness(provider: &UsbmuxdProvider) -> (Option<bool>, Option<bool>) {
+pub(crate) async fn check_developer_readiness(provider: &UsbmuxdProvider) -> (Option<bool>, Option<bool>) {
     let dev_mode = match ImageMounter::connect(provider).await {
         Ok(mut mounter) => mounter.query_developer_mode_status().await.ok(),
         Err(_) => None,
@@ -349,10 +349,17 @@ pub fn list_devices(manager: State<DeviceManager>) -> Vec<DeviceStatus> {
 }
 
 /// Forces an immediate re-scan of all attached devices (usbmuxd + lockdown),
-/// updating the shared cache and returning the fresh result.
+/// updating the shared cache and returning the fresh result. Like the
+/// background watcher, this uses the lightweight scan that doesn't re-check
+/// Developer Mode/Developer Disk Image, so previously-known readiness is
+/// carried forward rather than reset - only `get_device_info` (an actual
+/// readiness check) can legitimately prove `Ready` wrong.
 #[tauri::command]
 pub async fn refresh_devices(app: AppHandle) -> Result<Vec<DeviceStatus>, DeviceErrorInfo> {
-    let statuses = scan_devices().await?;
+    let mut statuses = scan_devices().await?;
+    let manager = app.state::<DeviceManager>();
+    let previous = manager.devices.lock().unwrap().clone();
+    carry_forward_readiness(&previous, &mut statuses);
     update_cache_and_emit(&app, statuses.clone());
     Ok(statuses)
 }
@@ -394,6 +401,58 @@ pub async fn get_device_info(app: AppHandle, udid: String) -> Result<DeviceStatu
 
 fn matches_udid(status: &DeviceStatus, udid: &str) -> bool {
     status.device.as_ref().map(|d| d.udid.as_str()) == Some(udid)
+}
+
+/// Carries forward previously-known readiness (`Ready` state,
+/// `developer_mode_enabled`, `developer_disk_image_mounted`) from `previous`
+/// onto `fresh` for devices the lightweight background scan re-observed as
+/// merely `Connected` - that scan never checks Developer Mode/Developer
+/// Disk Image (see `scan_devices`'s doc comment), so without this a device
+/// that was confirmed `Ready` a moment ago would flicker back to
+/// `Connected` / "not checked" on every 3-second poll tick even though
+/// nothing about its readiness actually changed. Only applies when the
+/// device is still present and still at least `Connected` - a device that
+/// dropped to `PairingRequired` (or disappeared) legitimately loses it.
+fn carry_forward_readiness(previous: &[DeviceStatus], fresh: &mut [DeviceStatus]) {
+    for status in fresh.iter_mut() {
+        if status.state != DeviceState::Connected {
+            continue;
+        }
+        let Some(udid) = status.device.as_ref().map(|d| d.udid.clone()) else {
+            continue;
+        };
+        let Some(prev) = previous.iter().find(|p| matches_udid(p, &udid)) else {
+            continue;
+        };
+        if prev.state == DeviceState::Ready {
+            status.state = DeviceState::Ready;
+        }
+        status.developer_mode_enabled = status.developer_mode_enabled.or(prev.developer_mode_enabled);
+        status.developer_disk_image_mounted = status.developer_disk_image_mounted.or(prev.developer_disk_image_mounted);
+    }
+}
+
+/// Downgrades a cached `Ready` device back to `Connected` (readiness now
+/// unknown pending a fresh `get_device_info` check) and re-emits
+/// immediately. Called when a real `set_location`/`clear_location` attempt
+/// fails with a Developer Mode/Developer Disk Image-related error, so the
+/// UI never keeps claiming `Ready` after the device has just proven
+/// otherwise.
+pub fn downgrade_readiness(app: &AppHandle, udid: &str) {
+    let manager = app.state::<DeviceManager>();
+    let snapshot = {
+        let mut devices = manager.devices.lock().unwrap();
+        if let Some(status) = devices.iter_mut().find(|s| matches_udid(s, udid)) {
+            if status.state == DeviceState::Ready {
+                status.state = DeviceState::Connected;
+            }
+            status.developer_mode_enabled = None;
+            status.developer_disk_image_mounted = None;
+        }
+        devices.clone()
+    };
+    *manager.last_snapshot.lock().unwrap() = serde_json::to_string(&snapshot).unwrap_or_default();
+    let _ = app.emit(DEVICES_CHANGED_EVENT, snapshot);
 }
 
 /// Initiates (or completes) USB pairing/trust for a device. Blocks, polling
@@ -487,8 +546,11 @@ pub fn spawn_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             match scan_devices().await {
-                Ok(statuses) => {
-                    *app.state::<DeviceManager>().last_watcher_error.lock().unwrap() = None;
+                Ok(mut statuses) => {
+                    let manager = app.state::<DeviceManager>();
+                    *manager.last_watcher_error.lock().unwrap() = None;
+                    let previous = manager.devices.lock().unwrap().clone();
+                    carry_forward_readiness(&previous, &mut statuses);
                     update_cache_and_emit(&app, statuses);
                 }
                 Err(e) => {
@@ -508,4 +570,105 @@ pub fn spawn_watcher(app: AppHandle) {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready_status(udid: &str) -> DeviceStatus {
+        DeviceStatus {
+            state: DeviceState::Ready,
+            device: Some(DeviceInfo {
+                udid: udid.to_string(),
+                name: "Test iPad".into(),
+                model: "iPad8,9".into(),
+                os_version: "iPadOS 18.7.8".into(),
+                connection_type: "usb".into(),
+                trusted: true,
+            }),
+            error: None,
+            developer_mode_enabled: Some(true),
+            developer_disk_image_mounted: Some(true),
+        }
+    }
+
+    fn connected_status(udid: &str) -> DeviceStatus {
+        DeviceStatus {
+            state: DeviceState::Connected,
+            device: Some(DeviceInfo {
+                udid: udid.to_string(),
+                name: "Test iPad".into(),
+                model: "iPad8,9".into(),
+                os_version: "iPadOS 18.7.8".into(),
+                connection_type: "usb".into(),
+                trusted: true,
+            }),
+            error: None,
+            developer_mode_enabled: None,
+            developer_disk_image_mounted: None,
+        }
+    }
+
+    #[test]
+    fn carries_forward_ready_across_a_lightweight_scan() {
+        let previous = vec![ready_status("udid-1")];
+        let mut fresh = vec![connected_status("udid-1")];
+
+        carry_forward_readiness(&previous, &mut fresh);
+
+        assert_eq!(fresh[0].state, DeviceState::Ready);
+        assert_eq!(fresh[0].developer_mode_enabled, Some(true));
+        assert_eq!(fresh[0].developer_disk_image_mounted, Some(true));
+    }
+
+    #[test]
+    fn does_not_carry_forward_ready_for_a_different_device() {
+        let previous = vec![ready_status("udid-1")];
+        let mut fresh = vec![connected_status("udid-2")];
+
+        carry_forward_readiness(&previous, &mut fresh);
+
+        assert_eq!(fresh[0].state, DeviceState::Connected);
+        assert_eq!(fresh[0].developer_mode_enabled, None);
+    }
+
+    #[test]
+    fn does_not_upgrade_pairing_required_to_ready() {
+        let previous = vec![ready_status("udid-1")];
+        let mut fresh = vec![DeviceStatus {
+            state: DeviceState::PairingRequired,
+            ..connected_status("udid-1")
+        }];
+
+        carry_forward_readiness(&previous, &mut fresh);
+
+        assert_eq!(fresh[0].state, DeviceState::PairingRequired);
+    }
+
+    #[test]
+    fn drops_readiness_for_a_disconnected_device() {
+        let previous = vec![ready_status("udid-1")];
+        // udid-1 no longer present in the fresh scan (device unplugged).
+        let mut fresh: Vec<DeviceStatus> = vec![];
+
+        carry_forward_readiness(&previous, &mut fresh);
+
+        assert!(fresh.is_empty());
+    }
+
+    #[test]
+    fn humanizes_the_test_device_product_type() {
+        // iPad8,9 is one of the 2018 iPad Pro 11" models - not in our small
+        // lookup table, so it should fall back to showing the raw
+        // identifier rather than guessing a name.
+        assert_eq!(humanize_product_type("iPad8,9"), "iPad8,9");
+        assert_eq!(humanize_product_type("iPad14,5"), "iPad Pro 12.9-inch (6th generation)");
+    }
+
+    #[test]
+    fn formats_os_version_by_device_family() {
+        assert_eq!(format_os_version("iPad8,9", "18.7.8"), "iPadOS 18.7.8");
+        assert_eq!(format_os_version("iPhone15,4", "18.7.8"), "iOS 18.7.8");
+    }
 }

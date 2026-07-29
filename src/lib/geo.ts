@@ -70,6 +70,17 @@ export function isValidLatitude(latitude: number): boolean {
   return Number.isFinite(latitude) && latitude >= -90 && latitude <= 90;
 }
 
+/**
+ * True only for a coordinate pair safe to send to a `LocationProvider` or
+ * use as a movement anchor: both fields finite (rules out `NaN`/`Infinity`
+ * from an uninitialized store, a bad parse, or a stale/corrupted value), and
+ * latitude in range. Longitude is cyclic (see `normalizeLongitude`), so any
+ * finite value is acceptable here rather than range-checked.
+ */
+export function isValidCoordinate(coords: Coordinates): boolean {
+  return isValidLatitude(coords.latitude) && Number.isFinite(coords.longitude);
+}
+
 export function kmToMiles(km: number): number {
   return km * 0.621371;
 }

@@ -19,6 +19,7 @@ SQLite for local history/logging.
 - [Trust / pairing](#trust--pairing)
 - [Developer requirements (Developer Mode + Developer Disk Image)](#developer-requirements-developer-mode--developer-disk-image)
 - [How to run](#how-to-run)
+- [Hardware diagnostic](#hardware-diagnostic)
 - [How to build a Windows .exe](#how-to-build-a-windows-exe)
 - [Troubleshooting](#troubleshooting)
 - [Project structure](#project-structure)
@@ -103,9 +104,15 @@ timed out) rather than a generic failure.
 
 ## Developer requirements (Developer Mode + Developer Disk Image)
 
-Location simulation uses the same on-device service Xcode's "Simulate
-Location" feature uses (`com.apple.dt.simulatelocation`). Like the rest of
-Apple's developer tooling, it requires:
+Location simulation uses the same on-device developer mechanism Xcode's
+"Simulate Location" feature uses. On iOS 17+ (including this project's
+reference device, an iPad8,9 on iPadOS 18.7.8) that means a CoreDeviceProxy
+tunnel -> RSD -> DVT `LocationSimulation` channel, not the classic
+`com.apple.dt.simulatelocation` lockdown service directly (which now returns
+`InvalidService`) - see
+[`docs/LOCATION_PROVIDERS.md`](docs/LOCATION_PROVIDERS.md) for the full
+stage-by-stage breakdown. Older devices use the classic service directly.
+Either way, it requires:
 
 1. **Developer Mode** enabled on the device: Settings → Privacy & Security →
    Developer Mode → On (device restarts and asks you to confirm). Available
@@ -141,10 +148,35 @@ reports "No Device" honestly until one is attached and trusted.
 Run the automated tests any time with:
 
 ```powershell
-pnpm test          # TypeScript: coordinate math, headings, movement engine pacing
+pnpm test          # TypeScript: coordinate math, headings, movement engine pacing,
+                   # movement safety guards, WASD/joystick held-key visual state
 cd src-tauri
-cargo test         # Rust: coordinate validation, distance calculations
+cargo test         # Rust: coordinate validation, distance calculations, READY-status
+                   # carry-forward, diagnostic report logic
+cargo clippy --all-targets -- -D warnings
 ```
+
+## Hardware diagnostic
+
+Verifying the real iOS 17+/18 location path (CoreDeviceProxy tunnel -> RSD ->
+DVT -> LocationSimulation) needs a physical device - unit tests alone can't
+prove a live USB protocol exchange works. `cargo run --bin diagnose` runs the
+exact same device/location code the app uses, one stage at a time, against
+whatever's attached, and prints a real PASS/FAIL for each - no GUI required:
+
+```powershell
+cd src-tauri
+cargo run --bin diagnose                  # first device usbmuxd reports
+cargo run --bin diagnose -- <UDID>        # a specific device, if more than one
+```
+
+It checks Apple USB service reachability, device detection, pairing/trust,
+Developer Mode + Developer Disk Image, the modern tunnel, RSD/DVT service
+discovery, setting one nearby test coordinate, and clearing it - stopping and
+marking the remaining stages `SKIP` the moment one fails, since each depends
+on the one before it. Exit code is `0` only if every stage passed. See
+[`docs/LOCATION_PROVIDERS.md`](docs/LOCATION_PROVIDERS.md#hardware-diagnostic)
+for what each stage actually does.
 
 ## How to build a Windows .exe
 
@@ -220,9 +252,12 @@ src/                        React + TypeScript frontend
 
 src-tauri/src/               Rust backend
   device/                    Real USB device detection/pairing (idevice crate)
-  location/                  Real location simulation + coordinate validation
+  location/                  Real location simulation (modern iOS17+ tunnel/RSD/DVT
+                               + legacy fallback) + coordinate validation
   database/                  SQLite schema + connection
   commands/                  Tauri commands for DB-backed history/logging
+  diagnostics.rs             Staged hardware diagnostic (device + location, PASS/FAIL)
+  bin/diagnose.rs            CLI entry point for the diagnostic above
 
 docs/LOCATION_PROVIDERS.md    Deep dive on the real location provider and its
                                real prerequisites/limitations

@@ -25,7 +25,7 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 log = "0.4"
 tauri-plugin-log = "2"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Pure-Rust reimplementation of libimobiledevice's protocols (usbmuxd,
@@ -43,6 +43,17 @@ idevice = { version = "=0.1.65", default-features = false, features = [
     "pair",
     "location_simulation",
     "mobile_image_mounter",
+    # iOS 17+ location simulation moved behind the CoreDeviceProxy tunnel:
+    # `com.apple.dt.simulatelocation` is no longer reachable via classic
+    # lockdown StartService (returns InvalidService) on iOS 17+. The real
+    # path is CoreDeviceProxy -> software TCP/IP tunnel -> RSD discovery ->
+    # DVT RemoteServer -> LocationSimulation channel. See
+    # src-tauri/src/location/modern.rs and docs/LOCATION_PROVIDERS.md.
+    "core_device_proxy",
+    "core_device",
+    "dvt",
+    "rsd",
+    "tunnel_tcp_stack",
 ] }
 plist = "1.8"
 

@@ -31,6 +31,13 @@ export function useMovementEngine(speedKmh: number) {
         }
       },
       speedKmh,
+      (reason) => {
+        // The engine itself refused to send this tick anywhere - the
+        // current position/speed/destination couldn't be trusted. Stop and
+        // say why, exactly like a real device rejecting the update.
+        useLogStore.getState().log("error", "Movement stopped: unsafe movement state", reason);
+        useLocationStore.getState().setMovementActive(false);
+      },
     );
   }
 

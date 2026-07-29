@@ -42,3 +42,15 @@ export function directionFromKeys(north: boolean, south: boolean, east: boolean,
   if (horizontal) return horizontal;
   return null;
 }
+
+/**
+ * Split a (possibly diagonal) direction into its constituent cardinal
+ * directions - "NE" -> ["N", "E"], "N" -> ["N"], null -> []. Used to decide
+ * which individual joystick/keyboard buttons should show as held, so a
+ * button's visual state is driven by the same key combination logic as the
+ * movement direction itself rather than a separate, divergent computation.
+ */
+export function decomposeDirection(direction: CompassDirection | null): CompassDirection[] {
+  if (!direction) return [];
+  return (direction.match(/[NSEW]/g) ?? []) as CompassDirection[];
+}

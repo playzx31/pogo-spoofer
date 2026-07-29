@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { destinationPoint, haversineDistanceKm, isValidLatitude, normalizeLongitude } from "./geo";
+import { destinationPoint, haversineDistanceKm, isValidCoordinate, isValidLatitude, normalizeLongitude } from "./geo";
 
 describe("haversineDistanceKm", () => {
   it("is zero for identical points", () => {
@@ -101,5 +101,28 @@ describe("isValidLatitude", () => {
     expect(isValidLatitude(-91)).toBe(false);
     expect(isValidLatitude(NaN)).toBe(false);
     expect(isValidLatitude(Infinity)).toBe(false);
+  });
+});
+
+describe("isValidCoordinate", () => {
+  it("accepts a normal coordinate pair", () => {
+    expect(isValidCoordinate({ latitude: 42.6073, longitude: -82.983 })).toBe(true);
+  });
+
+  it("accepts any finite longitude, since it is cyclic", () => {
+    expect(isValidCoordinate({ latitude: 0, longitude: 181 })).toBe(true);
+    expect(isValidCoordinate({ latitude: 0, longitude: -540 })).toBe(true);
+  });
+
+  it("rejects NaN or infinite latitude/longitude", () => {
+    expect(isValidCoordinate({ latitude: NaN, longitude: 0 })).toBe(false);
+    expect(isValidCoordinate({ latitude: 0, longitude: NaN })).toBe(false);
+    expect(isValidCoordinate({ latitude: Infinity, longitude: 0 })).toBe(false);
+    expect(isValidCoordinate({ latitude: 0, longitude: Infinity })).toBe(false);
+  });
+
+  it("rejects an out-of-range latitude", () => {
+    expect(isValidCoordinate({ latitude: 90.1, longitude: 0 })).toBe(false);
+    expect(isValidCoordinate({ latitude: -91, longitude: 0 })).toBe(false);
   });
 });

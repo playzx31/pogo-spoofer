@@ -4,7 +4,7 @@ import { Joystick } from "./Joystick";
 import { SpeedSelector, type SpeedMode } from "./SpeedSelector";
 import { useMovementEngine } from "./useMovementEngine";
 import { useKeyboardMovement } from "./useKeyboardMovement";
-import { directionFromHeading, type CompassDirection } from "./directions";
+import type { CompassDirection } from "./directions";
 import { useLocationStore } from "../state/locationStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { formatCoordinate, formatDistance, isValidLatitude, normalizeLongitude } from "../lib/geo";
@@ -29,8 +29,6 @@ export function MovementPanel() {
   const setTestLocation = useLocationStore((s) => s.setTestLocation);
   const lastError = useLocationStore((s) => s.lastError);
 
-  const activeDirection = movementActive ? directionFromHeading(heading) : null;
-
   const resolvedSpeedKmh =
     mode === "walking" ? speeds.walkingKmh : mode === "running" ? speeds.runningKmh : mode === "cycling" ? speeds.cyclingKmh : speeds.customKmh;
 
@@ -39,7 +37,7 @@ export function MovementPanel() {
   const start = (direction: CompassDirection) => engine.start(direction);
   const stop = () => engine.stop();
 
-  useKeyboardMovement({ start, stop, enabled: true });
+  const { heldDirections } = useKeyboardMovement({ start, stop, enabled: true });
 
   const handleManualSet = () => {
     const lat = parseFloat(manualLat);
@@ -61,7 +59,7 @@ export function MovementPanel() {
   return (
     <div className="movement-panel panel">
       <div className="movement-panel__body">
-        <Joystick activeDirection={activeDirection} onStart={start} onStop={stop} />
+        <Joystick activeDirections={heldDirections} onStart={start} onStop={stop} />
 
         <div className="movement-panel__stats">
           <div className="movement-panel__stats-grid">

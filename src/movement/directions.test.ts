@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { directionFromHeading, directionFromKeys, HEADING_DEGREES } from "./directions";
+import { decomposeDirection, directionFromHeading, directionFromKeys, HEADING_DEGREES } from "./directions";
 
 describe("directionFromKeys", () => {
   it("returns null when nothing is held", () => {
@@ -38,5 +38,23 @@ describe("directionFromHeading", () => {
   it("returns null for an unmapped heading or null input", () => {
     expect(directionFromHeading(null)).toBeNull();
     expect(directionFromHeading(37)).toBeNull();
+  });
+});
+
+describe("decomposeDirection", () => {
+  it("returns an empty list when idle", () => {
+    expect(decomposeDirection(null)).toEqual([]);
+  });
+
+  it("returns a single-element list for a cardinal direction", () => {
+    expect(decomposeDirection("N")).toEqual(["N"]);
+    expect(decomposeDirection("W")).toEqual(["W"]);
+  });
+
+  it("splits a diagonal into its two constituent cardinals", () => {
+    expect(decomposeDirection("NE")).toEqual(["N", "E"]);
+    expect(decomposeDirection("NW")).toEqual(["N", "W"]);
+    expect(decomposeDirection("SE")).toEqual(["S", "E"]);
+    expect(decomposeDirection("SW")).toEqual(["S", "W"]);
   });
 });

@@ -1,6 +1,9 @@
 mod commands;
 mod database;
 mod device;
+/// Public so `src/bin/diagnose.rs` (a separate binary crate) can drive the
+/// real hardware diagnostic without going through Tauri/the GUI at all.
+pub mod diagnostics;
 mod location;
 
 use std::sync::Mutex;

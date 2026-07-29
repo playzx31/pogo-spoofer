@@ -1,4 +1,4 @@
-import { destinationPoint, type Coordinates } from "../lib/geo";
+import { destinationPoint, isValidCoordinate, type Coordinates } from "../lib/geo";
 import { HEADING_DEGREES, type CompassDirection } from "./directions";
 
 /**
@@ -15,6 +15,16 @@ export type MovementTickHandler = (
 ) => Promise<boolean | void> | boolean | void;
 
 const TICK_MS = 300;
+
+/**
+ * Absolute backstop on how far a single tick may move, independent of the
+ * configured speed. Real per-tick distances at any sane walking/running/
+ * cycling/custom speed are a few meters at most (see `TICK_MS`); this only
+ * exists to catch a corrupted or out-of-bounds speed value (e.g. bad
+ * persisted settings) before it turns into a teleport-sized jump sent to a
+ * real device.
+ */
+const MAX_TICK_DISTANCE_KM = 5;
 
 /**
  * Pure, UI-agnostic engine that turns "a direction is being held at a given
@@ -44,6 +54,16 @@ export class MovementEngine {
     private readonly getPosition: () => Coordinates,
     private readonly onTick: MovementTickHandler,
     initialSpeedKmh: number,
+    /**
+     * Called instead of `onTick` when the engine refuses to compute a tick
+     * because its inputs are unsafe to move from (an invalid current
+     * position, an invalid speed, or a computed destination/distance that
+     * doesn't check out) - i.e. "movement state is unknown, so stop instead
+     * of guessing" rather than sending a real device a garbage or
+     * teleport-sized coordinate. The engine always stops immediately after
+     * calling this; it never retries automatically.
+     */
+    private readonly onSafetyStop?: (reason: string) => void,
   ) {
     this.speedKmh = initialSpeedKmh;
   }
@@ -78,13 +98,45 @@ export class MovementEngine {
     }, delayMs);
   }
 
+  /**
+   * Stops the engine without ever calling `onTick`, reporting why via
+   * `onSafetyStop`. Used when the inputs to a tick can't be trusted - an
+   * unknown/invalid position, speed, or destination is a reason to halt, not
+   * a value to send to a real device and hope for the best.
+   */
+  private abortTick(reason: string) {
+    this.direction = null;
+    this.ticking = false;
+    this.onSafetyStop?.(reason);
+  }
+
   private async runTick() {
     if (!this.direction || this.ticking) return;
     this.ticking = true;
 
+    const position = this.getPosition();
+    if (!isValidCoordinate(position)) {
+      this.abortTick(`current position is invalid (${position.latitude}, ${position.longitude})`);
+      return;
+    }
+
+    if (!Number.isFinite(this.speedKmh) || this.speedKmh < 0) {
+      this.abortTick(`speed is invalid (${this.speedKmh} km/h)`);
+      return;
+    }
+
     const bearing = HEADING_DEGREES[this.direction];
     const distanceKm = this.speedKmh * (TICK_MS / 3_600_000);
-    const next = destinationPoint(this.getPosition(), bearing, distanceKm);
+    if (!Number.isFinite(distanceKm) || distanceKm > MAX_TICK_DISTANCE_KM) {
+      this.abortTick(`computed tick distance is unsafe (${distanceKm} km at ${this.speedKmh} km/h)`);
+      return;
+    }
+
+    const next = destinationPoint(position, bearing, distanceKm);
+    if (!isValidCoordinate(next)) {
+      this.abortTick(`computed destination is invalid (${next.latitude}, ${next.longitude})`);
+      return;
+    }
 
     let shouldContinue = true;
     try {
